@@ -21,35 +21,24 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-
-      - name: Check formatting
-        run: cargo fmt --check
-
-      - name: Test
-        run: cargo test --locked
-
-      - name: Install cargo-deb
-        run: cargo install cargo-deb --locked
-
-      - name: Build release binary
-        run: cargo build --release --locked
-
-      - name: Prepare release binary
+      - name: Build and package on Debian 12
         run: |
-          mkdir -p target/dist
-          cp target/release/avel-pilot target/dist/avel-pilot-linux-amd64
-          chmod 755 target/dist/avel-pilot-linux-amd64
-
-      - name: Build Debian package
-        run: cargo deb --no-build
-
-      - name: Prepare Debian package
-        run: cp target/debian/*.deb target/dist/avel-pilot-linux-amd64.deb
+          docker run --rm \
+            -v "$PWD:/work" \
+            -w /work \
+            rust:1-bookworm \
+            bash -euxo pipefail -c '
+              rustup component add rustfmt
+              cargo fmt --check
+              cargo test --locked
+              cargo install cargo-deb --locked
+              cargo build --release --locked
+              mkdir -p target/dist
+              cp target/release/avel-pilot target/dist/avel-pilot-linux-amd64
+              chmod 755 target/dist/avel-pilot-linux-amd64
+              cargo deb --no-build
+              cp target/debian/*.deb target/dist/avel-pilot-linux-amd64.deb
+            '
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4

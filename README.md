@@ -143,6 +143,7 @@ Ctrl+C
 ## Pacchetto Debian/Ubuntu
 
 La GitHub Action `Debian packages` crea un pacchetto `.deb` e un eseguibile standalone Linux amd64 a ogni push su `main`, pull request, esecuzione manuale e tag `v*`.
+Build e packaging girano dentro Debian 12/bookworm, così lo stesso eseguibile resta compatibile con Debian 12 e Ubuntu recenti.
 
 Su tag `v*`, il pacchetto e l'eseguibile vengono anche allegati alla GitHub Release.
 
