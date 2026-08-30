@@ -4,12 +4,12 @@ Avel Pilot riconcilia servizi dichiarati in YAML con Nginx Proxy Manager e Cloud
 
 Il processo legge:
 
-- `config.yaml`: provider, zona DNS e host pubblico del proxy
-- `services.yaml`: servizi da esporre
+- `/etc/avel-pilot/config.yml`: provider, zona DNS e host pubblico del proxy
+- `/etc/avel-pilot/services.yml`: servizi da esporre
 
-Quando parte, applica subito lo stato desiderato. Poi resta in watch su `services.yaml` e riconcilia di nuovo ogni volta che il file cambia.
+Quando parte, applica subito lo stato desiderato. Poi resta in watch su `services.yml` e riconcilia di nuovo ogni volta che il file cambia.
 
-## config.yaml
+## config.yml
 
 Esempio:
 
@@ -45,7 +45,7 @@ Campi proxy:
 
 I valori `${VAR}` vengono espansi dall'ambiente prima del parsing YAML. Se usi `avel-pilot init`, invece, i segreti vengono scritti direttamente in `/etc/avel-pilot/config.yml`.
 
-## services.yaml
+## services.yml
 
 Esempio:
 
@@ -80,7 +80,7 @@ Campi servizio:
 - `tls`: se `true`, il proxy usa il certificato wildcard
 - `websocket`: se `true`, abilita websocket su NPM
 
-I domini devono stare dentro la zona configurata in `config.yaml`. Se la zona e' `avel.space`, `tv.avel.space` e' valido, `tv.example.com` no.
+I domini devono stare dentro la zona configurata in `config.yml`. Se la zona e' `avel.space`, `tv.avel.space` e' valido, `tv.example.com` no.
 
 ## Risorse Gestite
 
@@ -120,13 +120,19 @@ Poi avvia:
 cargo run
 ```
 
+Per usare file locali invece di `/etc/avel-pilot/*.yml`:
+
+```bash
+AVEL_PILOT_CONFIG=config.yaml AVEL_PILOT_SERVICES=services.yaml cargo run
+```
+
 Il processo:
 
-1. legge `config.yaml` e `services.yaml`
+1. legge `/etc/avel-pilot/config.yml` e `/etc/avel-pilot/services.yml`
 2. valida i servizi
 3. assicura il certificato wildcard se serve TLS
 4. riconcilia DNS record e proxy host
-5. resta in watch su `services.yaml`
+5. resta in watch su `services.yml`
 
 Per fermarlo:
 
@@ -158,7 +164,7 @@ sudo apt install ./avel-pilot_*.deb
 Il pacchetto installa:
 
 - binario: `/usr/bin/avel-pilot`
-- unit systemd: `/lib/systemd/system/avel-pilot.service`
+- unit systemd: `/usr/lib/systemd/system/avel-pilot.service`
 - esempi: `/usr/share/doc/avel-pilot/examples/`
 
 ### Configurazione
@@ -210,6 +216,13 @@ Controlla lo stato e i log:
 ```bash
 systemctl status avel-pilot
 journalctl -u avel-pilot -f
+```
+
+Se systemd non vede ancora il servizio:
+
+```bash
+sudo systemctl daemon-reload
+systemctl list-unit-files 'avel-pilot*'
 ```
 
 Dopo modifiche a `/etc/avel-pilot/config.yml`, riavvia:

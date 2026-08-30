@@ -15,8 +15,8 @@ use avel_pilot::{
 };
 use tokio::time;
 
-const DEFAULT_CONFIG_PATH: &str = "config.yaml";
-const DEFAULT_SERVICES_PATH: &str = "services.yaml";
+const DEFAULT_CONFIG_PATH: &str = "/etc/avel-pilot/config.yml";
+const DEFAULT_SERVICES_PATH: &str = "/etc/avel-pilot/services.yml";
 const WATCH_INTERVAL: Duration = Duration::from_secs(2);
 const SYSTEM_CONFIG_PATH: &str = "/etc/avel-pilot/config.yml";
 const SYSTEM_SERVICES_PATH: &str = "/etc/avel-pilot/services.yml";
@@ -32,6 +32,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::env::var("AVEL_PILOT_CONFIG").unwrap_or_else(|_| DEFAULT_CONFIG_PATH.to_owned());
     let services_path =
         std::env::var("AVEL_PILOT_SERVICES").unwrap_or_else(|_| DEFAULT_SERVICES_PATH.to_owned());
+    ensure_runtime_file(&config_path, "config")?;
+    ensure_runtime_file(&services_path, "services")?;
+
     let files = load_app_files(&config_path, &services_path)?;
     let config = files.config;
     let mut services = files.services;
@@ -117,6 +120,14 @@ fn providers(
     };
 
     Ok((dns_provider, proxy_provider))
+}
+
+fn ensure_runtime_file(path: &str, kind: &str) -> Result<(), Box<dyn std::error::Error>> {
+    if Path::new(path).exists() {
+        return Ok(());
+    }
+
+    Err(format!("{kind} file not found at {path}. Run `sudo avel-pilot init` first.").into())
 }
 
 fn init_config() -> Result<(), Box<dyn std::error::Error>> {

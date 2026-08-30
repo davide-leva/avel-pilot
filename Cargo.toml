@@ -1,6 +1,6 @@
 [package]
 name = "avel-pilot"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 authors = ["Avel Pilot Maintainers"]
 description = "Rust reconciler for Cloudflare DNS and Nginx Proxy Manager homelab services"
@@ -20,10 +20,11 @@ maintainer = "Avel Pilot Maintainers"
 extended-description = "Avel Pilot reconciles YAML-defined services with tagged Cloudflare DNS records and Nginx Proxy Manager proxy hosts."
 section = "admin"
 priority = "optional"
+maintainer-scripts = "packaging/debian"
 assets = [
     ["target/release/avel-pilot", "usr/bin/avel-pilot", "755"],
     ["README.md", "usr/share/doc/avel-pilot/README.md", "644"],
     ["packaging/examples/config.yml", "usr/share/doc/avel-pilot/examples/config.yml", "644"],
     ["packaging/examples/services.yml", "usr/share/doc/avel-pilot/examples/services.yml", "644"],
-    ["packaging/systemd/avel-pilot.service", "lib/systemd/system/avel-pilot.service", "644"],
+    ["packaging/systemd/avel-pilot.service", "usr/lib/systemd/system/avel-pilot.service", "644"],
 ]
