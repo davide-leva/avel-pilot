@@ -39,8 +39,21 @@ jobs:
       - name: Build release binary
         run: cargo build --release --locked
 
+      - name: Prepare release binary
+        run: |
+          mkdir -p target/dist
+          cp target/release/avel-pilot target/dist/avel-pilot-linux-amd64
+          chmod 755 target/dist/avel-pilot-linux-amd64
+
       - name: Build Debian package
         run: cargo deb --no-build
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: avel-pilot-linux-amd64
+          path: target/dist/avel-pilot-linux-amd64
+          if-no-files-found: error
 
       - name: Upload package artifact
         uses: actions/upload-artifact@v4
@@ -53,4 +66,6 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: target/debian/*.deb
+          files: |
+            target/dist/avel-pilot-linux-amd64
+            target/debian/*.deb

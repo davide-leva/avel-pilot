@@ -136,9 +136,9 @@ Ctrl+C
 
 ## Pacchetto Debian/Ubuntu
 
-La GitHub Action `Debian packages` crea un pacchetto `.deb` a ogni push su `main`, pull request, esecuzione manuale e tag `v*`.
+La GitHub Action `Debian packages` crea un pacchetto `.deb` e un eseguibile standalone Linux amd64 a ogni push su `main`, pull request, esecuzione manuale e tag `v*`.
 
-Su tag `v*`, il pacchetto viene anche allegato alla GitHub Release.
+Su tag `v*`, il pacchetto e l'eseguibile vengono anche allegati alla GitHub Release.
 
 ### Installazione Da Release
 
