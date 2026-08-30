@@ -1,0 +1,16 @@
+[Unit]
+Description=Avel Pilot reconciler
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/default/avel-pilot
+Environment=AVEL_PILOT_CONFIG=/etc/avel-pilot/config.yml
+Environment=AVEL_PILOT_SERVICES=/etc/avel-pilot/services.yml
+ExecStart=/usr/bin/avel-pilot
+Restart=on-failure
+RestartSec=10s
+
+[Install]
+WantedBy=multi-user.target

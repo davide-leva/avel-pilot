@@ -1,0 +1,29 @@
+[package]
+name = "avel-pilot"
+version = "0.1.0"
+edition = "2024"
+authors = ["Avel Pilot Maintainers"]
+description = "Rust reconciler for Cloudflare DNS and Nginx Proxy Manager homelab services"
+
+[dependencies]
+async-trait = "0.1.92"
+rand = "0.9.2"
+reqwest = { version = "0.13.4", features = ["json", "query"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+serde_yaml = "0.9.34"
+thiserror = "2.0.20"
+tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+
+[package.metadata.deb]
+maintainer = "Avel Pilot Maintainers"
+extended-description = "Avel Pilot reconciles YAML-defined services with tagged Cloudflare DNS records and Nginx Proxy Manager proxy hosts."
+section = "admin"
+priority = "optional"
+assets = [
+    ["target/release/avel-pilot", "usr/bin/avel-pilot", "755"],
+    ["README.md", "usr/share/doc/avel-pilot/README.md", "644"],
+    ["packaging/examples/config.yaml", "usr/share/doc/avel-pilot/examples/config.yaml", "644"],
+    ["packaging/examples/services.yaml", "usr/share/doc/avel-pilot/examples/services.yaml", "644"],
+    ["packaging/systemd/avel-pilot.service", "lib/systemd/system/avel-pilot.service", "644"],
+]
