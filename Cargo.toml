@@ -23,7 +23,7 @@ priority = "optional"
 assets = [
     ["target/release/avel-pilot", "usr/bin/avel-pilot", "755"],
     ["README.md", "usr/share/doc/avel-pilot/README.md", "644"],
-    ["packaging/examples/config.yaml", "usr/share/doc/avel-pilot/examples/config.yaml", "644"],
-    ["packaging/examples/services.yaml", "usr/share/doc/avel-pilot/examples/services.yaml", "644"],
+    ["packaging/examples/config.yml", "usr/share/doc/avel-pilot/examples/config.yml", "644"],
+    ["packaging/examples/services.yml", "usr/share/doc/avel-pilot/examples/services.yml", "644"],
     ["packaging/systemd/avel-pilot.service", "lib/systemd/system/avel-pilot.service", "644"],
 ]

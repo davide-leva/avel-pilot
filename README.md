@@ -192,8 +192,8 @@ sudo editor /etc/avel-pilot/services.yml
 Puoi anche partire dagli esempi installati dal pacchetto:
 
 ```bash
-sudo cp /usr/share/doc/avel-pilot/examples/config.yaml /etc/avel-pilot/config.yml
-sudo cp /usr/share/doc/avel-pilot/examples/services.yaml /etc/avel-pilot/services.yml
+sudo cp /usr/share/doc/avel-pilot/examples/config.yml /etc/avel-pilot/config.yml
+sudo cp /usr/share/doc/avel-pilot/examples/services.yml /etc/avel-pilot/services.yml
 ```
 
 ### Avvio Con systemd

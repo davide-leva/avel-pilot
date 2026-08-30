@@ -1,0 +1,9 @@
+services:
+  jellyfin:
+    domain: tv.example.com
+    upstream:
+      scheme: http
+      host: 10.0.5.101
+      port: 8096
+    tls: true
+    websocket: true

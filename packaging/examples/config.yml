@@ -1,0 +1,12 @@
+dns:
+  type: cloudflare
+  zone: example.com
+  api_token: ${CLOUDFLARE_API_TOKEN}
+  propagation_seconds: 120
+
+proxy:
+  type: npm
+  host: 203.0.113.10
+  url: http://127.0.0.1:81
+  identity: ${NPM_IDENTITY}
+  secret: ${NPM_SECRET}
