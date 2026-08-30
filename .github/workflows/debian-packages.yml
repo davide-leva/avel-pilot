@@ -48,6 +48,9 @@ jobs:
       - name: Build Debian package
         run: cargo deb --no-build
 
+      - name: Prepare Debian package
+        run: cp target/debian/*.deb target/dist/avel-pilot-linux-amd64.deb
+
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
@@ -59,13 +62,15 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: avel-pilot-debian-package
-          path: target/debian/*.deb
+          path: |
+            target/dist/avel-pilot-linux-amd64.deb
+            target/debian/*.deb
           if-no-files-found: error
 
-      - name: Publish package on GitHub Release
+      - name: Publish assets on GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           files: |
             target/dist/avel-pilot-linux-amd64
-            target/debian/*.deb
+            target/dist/avel-pilot-linux-amd64.deb

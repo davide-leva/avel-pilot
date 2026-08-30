@@ -148,17 +148,30 @@ Su tag `v*`, il pacchetto e l'eseguibile vengono anche allegati alla GitHub Rele
 
 ### Installazione Da Release
 
-Scarica il pacchetto `.deb` dalla pagina Releases del repository, poi installalo:
+Scarica e installa il pacchetto `.deb` dall'ultima release:
 
 ```bash
-sudo apt install ./avel-pilot_0.1.0-1_amd64.deb
+curl -LO https://github.com/davide-leva/avel-pilot/releases/latest/download/avel-pilot-linux-amd64.deb
+sudo apt install ./avel-pilot-linux-amd64.deb
+```
+
+Link stabile del pacchetto:
+
+```text
+https://github.com/davide-leva/avel-pilot/releases/latest/download/avel-pilot-linux-amd64.deb
+```
+
+Link stabile dell'eseguibile standalone:
+
+```text
+https://github.com/davide-leva/avel-pilot/releases/latest/download/avel-pilot-linux-amd64
 ```
 
 In alternativa, se hai scaricato l'artifact della GitHub Action, estrai lo zip e installa il `.deb` contenuto:
 
 ```bash
 unzip avel-pilot-debian-package.zip
-sudo apt install ./avel-pilot_*.deb
+sudo apt install ./avel-pilot-linux-amd64.deb
 ```
 
 Il pacchetto installa:
