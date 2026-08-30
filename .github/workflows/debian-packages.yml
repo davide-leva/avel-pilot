@@ -33,6 +33,11 @@ jobs:
               cargo test --locked
               cargo install cargo-deb --locked
               cargo build --release --locked
+              max_glibc="$(objdump -T target/release/avel-pilot | sed -n "s/.*(GLIBC_\([0-9][0-9.]*\)).*/\1/p" | sort -V | tail -1)"
+              if [ -n "$max_glibc" ] && [ "$(printf "%s\n" "2.36" "$max_glibc" | sort -V | tail -1)" != "2.36" ]; then
+                echo "target/release/avel-pilot requires GLIBC_$max_glibc, but the maximum allowed version is GLIBC_2.36" >&2
+                exit 1
+              fi
               mkdir -p target/dist
               cp target/release/avel-pilot target/dist/avel-pilot-linux-amd64
               chmod 755 target/dist/avel-pilot-linux-amd64
