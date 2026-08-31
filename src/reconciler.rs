@@ -14,6 +14,7 @@ use crate::{
     dns_provider::{
         Dns01ProviderConfig, DnsChange, DnsProvider, DnsProviderError, DnsRecord, DnsRecordType,
     },
+    logging,
     proxy_provider::{
         CertificateRef, ProxyChange, ProxyError, ProxyHost, ProxyProvider, Upstream, UpstreamScheme,
     },
@@ -48,21 +49,63 @@ pub async fn reconcile(
     proxy_provider: &impl ProxyProvider,
     cert_provider: &impl CertProvider,
 ) -> Result<(), ReconcileError> {
-    validate(config, services)?;
+    logging::timed("validate configuration and services", || {
+        validate(config, services)
+    })?;
 
     let zone = zone(config);
-    let dns01 = dns01_provider_config(config, services, dns_provider)?;
-    let certificate_id = ensure_wildcard_certificate(zone, services, dns01, cert_provider).await?;
-    let desired = build_desired_state(config, services, certificate_id)?;
+    let dns01 = logging::timed("build DNS-01 provider config", || {
+        dns01_provider_config(config, services, dns_provider)
+    })?;
+    let certificate_id = logging::timed_async(
+        format!("ensure wildcard certificate for zone {zone}"),
+        ensure_wildcard_certificate(zone, services, dns01, cert_provider),
+    )
+    .await?;
+    let desired = logging::timed("build desired state", || {
+        build_desired_state(config, services, certificate_id)
+    })?;
+    logging::info(format_args!(
+        "Desired state dns_records={} proxy_hosts={} certificates={}",
+        desired.dns_records.len(),
+        desired.proxy_hosts.len(),
+        desired.certificates.len()
+    ));
 
-    let actual_dns = dns_provider.records(zone).await?;
-    for change in diff_dns_records(&desired.dns_records, &actual_dns) {
-        dns_provider.apply(zone, change).await?;
+    let actual_dns = logging::timed_async(
+        format!("load managed DNS records for zone {zone}"),
+        dns_provider.records(zone),
+    )
+    .await?;
+    logging::info(format_args!(
+        "Loaded {} managed DNS records",
+        actual_dns.len()
+    ));
+    let dns_changes = logging::timed("diff DNS records", || {
+        Ok::<_, ReconcileError>(diff_dns_records(&desired.dns_records, &actual_dns))
+    })?;
+    logging::info(format_args!("DNS changes to apply: {}", dns_changes.len()));
+    for change in dns_changes {
+        let operation = describe_dns_change(zone, &change);
+        logging::timed_async(operation, dns_provider.apply(zone, change)).await?;
     }
 
-    let actual_proxy = proxy_provider.hosts().await?;
-    for change in diff_proxy_hosts(&desired.proxy_hosts, &actual_proxy) {
-        proxy_provider.apply(change).await?;
+    let actual_proxy =
+        logging::timed_async("load managed proxy hosts", proxy_provider.hosts()).await?;
+    logging::info(format_args!(
+        "Loaded {} managed proxy hosts",
+        actual_proxy.len()
+    ));
+    let proxy_changes = logging::timed("diff proxy hosts", || {
+        Ok::<_, ReconcileError>(diff_proxy_hosts(&desired.proxy_hosts, &actual_proxy))
+    })?;
+    logging::info(format_args!(
+        "Proxy changes to apply: {}",
+        proxy_changes.len()
+    ));
+    for change in proxy_changes {
+        let operation = describe_proxy_change(&change);
+        logging::timed_async(operation, proxy_provider.apply(change)).await?;
     }
 
     Ok(())
@@ -282,6 +325,7 @@ async fn ensure_wildcard_certificate(
     cert_provider: &impl CertProvider,
 ) -> Result<Option<CertificateId>, ReconcileError> {
     if !services.services.values().any(|service| service.tls) {
+        logging::info("No TLS services declared; skipping wildcard certificate");
         return Ok(None);
     }
 
@@ -290,18 +334,42 @@ async fn ensure_wildcard_certificate(
     })?;
 
     let wildcard_domain = wildcard_domain(zone);
-    let actual = cert_provider.certificates().await?;
+    let actual = logging::timed_async(
+        "load Let's Encrypt certificates from proxy provider",
+        cert_provider.certificates(),
+    )
+    .await?;
+    logging::info(format_args!(
+        "Loaded {} Let's Encrypt certificates",
+        actual.len()
+    ));
     let existing = find_certificate_id(&actual, &[wildcard_domain.clone()]);
     if let Some(id) = existing {
+        logging::info(format_args!(
+            "Found existing wildcard certificate domain={wildcard_domain} id={}",
+            id.0
+        ));
         return Ok(Some(id));
     }
 
     let certificate = wildcard_certificate(zone, Some(dns01.clone()), None);
-    for change in diff_certificates(&[certificate], &actual) {
-        cert_provider.apply(change).await?;
+    let certificate_changes = logging::timed("diff certificates", || {
+        Ok::<_, ReconcileError>(diff_certificates(&[certificate], &actual))
+    })?;
+    logging::info(format_args!(
+        "Certificate changes to apply: {}",
+        certificate_changes.len()
+    ));
+    for change in certificate_changes {
+        let operation = describe_certificate_change(&change);
+        logging::timed_async(operation, cert_provider.apply(change)).await?;
     }
 
-    let actual = cert_provider.certificates().await?;
+    let actual = logging::timed_async(
+        "reload Let's Encrypt certificates from proxy provider",
+        cert_provider.certificates(),
+    )
+    .await?;
     find_certificate_id(&actual, &[wildcard_domain.clone()])
         .ok_or_else(|| {
             ReconcileError::InvalidConfig(format!(
@@ -309,6 +377,82 @@ async fn ensure_wildcard_certificate(
             ))
         })
         .map(Some)
+}
+
+fn describe_dns_change(zone: &str, change: &DnsChange) -> String {
+    match change {
+        DnsChange::Create(record) => format!(
+            "create DNS record zone={zone} name={} type={} value={}",
+            record.name,
+            dns_record_type_name(&record.record_type),
+            record.value
+        ),
+        DnsChange::Update { id, record } => format!(
+            "update DNS record zone={zone} id={} name={} type={} value={}",
+            id.0,
+            record.name,
+            dns_record_type_name(&record.record_type),
+            record.value
+        ),
+        DnsChange::Delete { id } => {
+            format!("delete DNS record zone={zone} id={}", id.0)
+        }
+    }
+}
+
+fn describe_proxy_change(change: &ProxyChange) -> String {
+    match change {
+        ProxyChange::Create(host) => format!(
+            "create proxy host domains={} upstream={}://{}:{} tls={} websocket={}",
+            host.domains.join(","),
+            upstream_scheme_name(&host.upstream.scheme),
+            host.upstream.host,
+            host.upstream.port,
+            host.certificate.is_some(),
+            host.websocket
+        ),
+        ProxyChange::Update { id, host } => format!(
+            "update proxy host id={} domains={} upstream={}://{}:{} tls={} websocket={}",
+            id.0,
+            host.domains.join(","),
+            upstream_scheme_name(&host.upstream.scheme),
+            host.upstream.host,
+            host.upstream.port,
+            host.certificate.is_some(),
+            host.websocket
+        ),
+        ProxyChange::Delete { id } => format!("delete proxy host id={}", id.0),
+    }
+}
+
+fn describe_certificate_change(change: &CertificateChange) -> String {
+    match change {
+        CertificateChange::Create(certificate) => {
+            format!(
+                "create certificate domains={}",
+                certificate.domains.join(",")
+            )
+        }
+        CertificateChange::Renew { id } => format!("renew certificate id={}", id.0),
+        CertificateChange::Delete { id } => format!("delete certificate id={}", id.0),
+    }
+}
+
+fn dns_record_type_name(record_type: &DnsRecordType) -> &'static str {
+    match record_type {
+        DnsRecordType::A => "A",
+        DnsRecordType::Aaaa => "AAAA",
+        DnsRecordType::Cname => "CNAME",
+        DnsRecordType::Txt => "TXT",
+        DnsRecordType::Mx => "MX",
+    }
+}
+
+fn upstream_scheme_name(scheme: &UpstreamScheme) -> &'static str {
+    match scheme {
+        UpstreamScheme::Http => "http",
+        UpstreamScheme::Https => "https",
+    }
 }
 
 fn dns01_provider_config(

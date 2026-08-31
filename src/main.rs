@@ -10,6 +10,7 @@ use avel_pilot::{
         CertificateConfig, Config, DnsConfig, ProxyConfig, ServicesFile, load_app_files, load_yaml,
     },
     dns_provider::cloudflare::CloudflareDnsProvider,
+    logging,
     proxy_provider::npm::NPMProxyProvider,
     reconciler::reconcile,
 };
@@ -32,16 +33,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::env::var("AVEL_PILOT_CONFIG").unwrap_or_else(|_| DEFAULT_CONFIG_PATH.to_owned());
     let services_path =
         std::env::var("AVEL_PILOT_SERVICES").unwrap_or_else(|_| DEFAULT_SERVICES_PATH.to_owned());
-    ensure_runtime_file(&config_path, "config")?;
-    ensure_runtime_file(&services_path, "services")?;
+    logging::info(format_args!(
+        "Using config_path={config_path} services_path={services_path}"
+    ));
 
-    let files = load_app_files(&config_path, &services_path)?;
+    logging::timed(format!("check config file {config_path}"), || {
+        ensure_runtime_file(&config_path, "config")
+    })?;
+    logging::timed(format!("check services file {services_path}"), || {
+        ensure_runtime_file(&services_path, "services")
+    })?;
+
+    let files = logging::timed(
+        format!("load app files from {config_path} and {services_path}"),
+        || load_app_files(&config_path, &services_path),
+    )?;
     let config = files.config;
     let mut services = files.services;
-    let mut services_modified_at = modified_at(&services_path)?;
+    let mut services_modified_at =
+        logging::timed(format!("read modified time for {services_path}"), || {
+            modified_at(&services_path)
+        })?;
 
     run_reconcile(&config, &services).await;
-    println!("Watching {services_path} for changes");
+    logging::info(format_args!("Watching {services_path} for changes"));
 
     let mut interval = time::interval(WATCH_INTERVAL);
     let shutdown = shutdown_signal();
@@ -51,23 +66,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::select! {
             result = &mut shutdown => {
                 result?;
-                println!("Shutting down");
+                logging::info("Shutting down");
                 break;
             }
             _ = interval.tick() => {
-                let modified_at = modified_at(&services_path)?;
+                let modified_at = logging::timed(format!("read modified time for {services_path}"), || {
+                    modified_at(&services_path)
+                })?;
                 if modified_at <= services_modified_at {
                     continue;
                 }
 
                 services_modified_at = modified_at;
-                match load_yaml::<ServicesFile>(&services_path) {
+                match logging::timed(format!("reload services from {services_path}"), || {
+                    load_yaml::<ServicesFile>(&services_path)
+                }) {
                     Ok(next_services) => {
                         services = next_services;
                         run_reconcile(&config, &services).await;
                     }
                     Err(error) => {
-                        eprintln!("Failed to reload {services_path}: {error}");
+                        logging::error(format_args!("Failed to reload {services_path}: {error}"));
                     }
                 }
             }
@@ -78,28 +97,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn run_reconcile(config: &Config, services: &ServicesFile) {
-    let (dns_provider, proxy_provider) = match providers(config) {
-        Ok(providers) => providers,
-        Err(error) => {
-            eprintln!("Failed to initialize providers: {error}");
-            return;
-        }
-    };
+    let (dns_provider, proxy_provider) =
+        match logging::timed("initialize providers", || providers(config)) {
+            Ok(providers) => providers,
+            Err(error) => {
+                logging::error(format_args!("Failed to initialize providers: {error}"));
+                return;
+            }
+        };
 
-    match reconcile(
-        config,
-        services,
-        &dns_provider,
-        &proxy_provider,
-        &proxy_provider,
+    match logging::timed_async(
+        format!("reconcile {} services", services.services.len()),
+        reconcile(
+            config,
+            services,
+            &dns_provider,
+            &proxy_provider,
+            &proxy_provider,
+        ),
     )
     .await
     {
-        Ok(()) => println!(
+        Ok(()) => logging::info(format_args!(
             "Reconcile completed for {} services",
             services.services.len()
-        ),
-        Err(error) => eprintln!("Reconcile failed: {error}"),
+        )),
+        Err(error) => logging::error(format_args!("Reconcile failed: {error}")),
     }
 }
 
@@ -131,16 +154,18 @@ fn ensure_runtime_file(path: &str, kind: &str) -> Result<(), Box<dyn std::error:
 }
 
 fn init_config() -> Result<(), Box<dyn std::error::Error>> {
-    println!("Creating {SYSTEM_CONFIG_PATH} and {SYSTEM_SERVICES_PATH}");
+    logging::info(format_args!(
+        "Creating {SYSTEM_CONFIG_PATH} and {SYSTEM_SERVICES_PATH}"
+    ));
 
     let config_path = Path::new(SYSTEM_CONFIG_PATH);
     let services_path = Path::new(SYSTEM_SERVICES_PATH);
     if config_path.exists() && !confirm("Config already exists. Overwrite?", false)? {
-        println!("Aborted");
+        logging::warn("Aborted");
         return Ok(());
     }
     if services_path.exists() && !confirm("Services file already exists. Overwrite?", false)? {
-        println!("Aborted");
+        logging::warn("Aborted");
         return Ok(());
     }
 
@@ -171,14 +196,24 @@ fn init_config() -> Result<(), Box<dyn std::error::Error>> {
     let content = serde_yaml::to_string(&config)?;
 
     if let Some(parent) = config_path.parent() {
-        fs::create_dir_all(parent)?;
+        logging::timed(
+            format!("create config directory {}", parent.display()),
+            || fs::create_dir_all(parent),
+        )?;
     }
 
-    fs::write(config_path, content)?;
-    fs::write(services_path, services_example(&zone))?;
-    set_private_permissions(config_path)?;
-    println!("Wrote {SYSTEM_CONFIG_PATH}");
-    println!("Wrote {SYSTEM_SERVICES_PATH}");
+    logging::timed(format!("write {SYSTEM_CONFIG_PATH}"), || {
+        fs::write(config_path, content)
+    })?;
+    logging::timed(format!("write {SYSTEM_SERVICES_PATH}"), || {
+        fs::write(services_path, services_example(&zone))
+    })?;
+    logging::timed(
+        format!("set private permissions on {SYSTEM_CONFIG_PATH}"),
+        || set_private_permissions(config_path),
+    )?;
+    logging::info(format_args!("Wrote {SYSTEM_CONFIG_PATH}"));
+    logging::info(format_args!("Wrote {SYSTEM_SERVICES_PATH}"));
 
     Ok(())
 }
@@ -229,7 +264,7 @@ fn prompt_required(
             return Ok(value);
         }
 
-        eprintln!("{label} is required");
+        logging::error(format_args!("{label} is required"));
     }
 }
 

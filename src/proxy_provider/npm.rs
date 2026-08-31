@@ -7,6 +7,7 @@ use crate::cert_provider::{
     CertProvider, CertProviderError, CertProviderResult, Certificate, CertificateChallenge,
     CertificateChange, CertificateId, CertificateMeta, MANAGED_CERTIFICATE_NAME_MARKER,
 };
+use crate::logging;
 use crate::proxy_provider::{
     CertificateRef, ProxyChange, ProxyError, ProxyHost, ProxyHostId, ProxyProvider, ProxyResult,
     Upstream, UpstreamScheme,
@@ -272,7 +273,7 @@ impl NPMProxyProvider {
     }
 
     async fn login(&self) -> ProxyResult<String> {
-        let token = self
+        let response = self
             .client
             .post(format!("{}/api/tokens", self.base_url))
             .json(&TokenRequest {
@@ -280,9 +281,8 @@ impl NPMProxyProvider {
                 secret: &self.secret,
             })
             .send()
-            .await?
-            .error_for_status()?
-            .json::<TokenResponse>()
+            .await?;
+        let token = Self::decode_response::<TokenResponse>(response, "POST", "/api/tokens")
             .await?
             .token;
 
@@ -304,6 +304,7 @@ impl NPMProxyProvider {
         T: DeserializeOwned,
     {
         let token = self.auth_token().await?;
+        let method_name = method.as_str().to_owned();
         let response = self
             .client
             .request(method, format!("{}{}", self.base_url, path))
@@ -311,7 +312,7 @@ impl NPMProxyProvider {
             .send()
             .await?;
 
-        Self::decode_response(response).await
+        Self::decode_response(response, method_name.as_str(), path).await
     }
 
     async fn request_with_body<B, T>(&self, method: Method, path: &str, body: &B) -> ProxyResult<T>
@@ -320,6 +321,7 @@ impl NPMProxyProvider {
         T: DeserializeOwned,
     {
         let token = self.auth_token().await?;
+        let method_name = method.as_str().to_owned();
         let response = self
             .client
             .request(method, format!("{}{}", self.base_url, path))
@@ -328,11 +330,12 @@ impl NPMProxyProvider {
             .send()
             .await?;
 
-        Self::decode_response(response).await
+        Self::decode_response(response, method_name.as_str(), path).await
     }
 
     async fn request_empty(&self, method: Method, path: &str) -> ProxyResult {
         let token = self.auth_token().await?;
+        let method_name = method.as_str().to_owned();
         let response = self
             .client
             .request(method, format!("{}{}", self.base_url, path))
@@ -344,10 +347,14 @@ impl NPMProxyProvider {
             return Ok(());
         }
 
-        Err(Self::api_error(response).await)
+        Err(Self::api_error(response, method_name.as_str(), path).await)
     }
 
-    async fn decode_response<T>(response: reqwest::Response) -> ProxyResult<T>
+    async fn decode_response<T>(
+        response: reqwest::Response,
+        method: &str,
+        path: &str,
+    ) -> ProxyResult<T>
     where
         T: DeserializeOwned,
     {
@@ -355,20 +362,26 @@ impl NPMProxyProvider {
             return Ok(response.json::<T>().await?);
         }
 
-        Err(Self::api_error(response).await)
+        Err(Self::api_error(response, method, path).await)
     }
 
-    async fn api_error(response: reqwest::Response) -> ProxyError {
+    async fn api_error(response: reqwest::Response, method: &str, path: &str) -> ProxyError {
         let status = response.status();
         let message = match response.text().await {
-            Ok(text) => serde_json::from_str::<NpmErrorResponse>(&text)
-                .ok()
-                .and_then(|error| {
-                    error
-                        .message
-                        .or_else(|| error.error.map(|body| body.message))
-                })
-                .unwrap_or(text),
+            Ok(text) => {
+                logging::error(format_args!(
+                    "NPM non-2xx response method={method} path={path} status={} body={text}",
+                    status.as_u16()
+                ));
+                serde_json::from_str::<NpmErrorResponse>(&text)
+                    .ok()
+                    .and_then(|error| {
+                        error
+                            .message
+                            .or_else(|| error.error.map(|body| body.message))
+                    })
+                    .unwrap_or(text)
+            }
             Err(error) => error.to_string(),
         };
 

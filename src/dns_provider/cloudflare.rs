@@ -1,13 +1,16 @@
 use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
-use reqwest::{Client, Method};
+use reqwest::{Client, Method, Response};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use tokio::sync::RwLock;
 
-use crate::dns_provider::{
-    Dns01ProviderConfig, DnsChange, DnsProvider, DnsProviderError, DnsProviderResult, DnsRecord,
-    DnsRecordId, DnsRecordType,
+use crate::{
+    dns_provider::{
+        Dns01ProviderConfig, DnsChange, DnsProvider, DnsProviderError, DnsProviderResult,
+        DnsRecord, DnsRecordId, DnsRecordType,
+    },
+    logging,
 };
 
 const CLOUDFLARE_API_URL: &str = "https://api.cloudflare.com/client/v4";
@@ -20,9 +23,6 @@ struct CloudflareResponse<T> {
 
     #[serde(default)]
     errors: Vec<CloudflareApiError>,
-
-    #[serde(default)]
-    messages: Vec<CloudflareApiError>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -50,12 +50,6 @@ struct CloudflareRecord {
 
     #[serde(default)]
     comment: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-struct DnsZone {
-    pub id: String,
-    pub name: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -138,15 +132,16 @@ impl CloudflareDnsProvider {
     where
         T: DeserializeOwned,
     {
+        let method_name = method.as_str().to_owned();
+        let path = path.to_owned();
         let response = self
             .client
             .request(method, format!("{CLOUDFLARE_API_URL}{path}"))
             .bearer_auth(&self.api_token)
             .send()
-            .await?
-            .error_for_status()?
-            .json::<CloudflareResponse<T>>()
             .await?;
+
+        let response = Self::decode_response(response, &method_name, &path).await?;
 
         if !response.success {
             let error = response
@@ -177,16 +172,17 @@ impl CloudflareDnsProvider {
         B: Serialize + ?Sized,
         T: DeserializeOwned,
     {
+        let method_name = method.as_str().to_owned();
+        let path = path.to_owned();
         let response = self
             .client
             .request(method, format!("{CLOUDFLARE_API_URL}{path}"))
             .bearer_auth(&self.api_token)
             .json(body)
             .send()
-            .await?
-            .error_for_status()?
-            .json::<CloudflareResponse<T>>()
             .await?;
+
+        let response = Self::decode_response(response, &method_name, &path).await?;
 
         if !response.success {
             let error = response
@@ -206,6 +202,31 @@ impl CloudflareDnsProvider {
 
         Ok(response.result)
     }
+
+    async fn decode_response<T>(
+        response: Response,
+        method: &str,
+        path: &str,
+    ) -> DnsProviderResult<CloudflareResponse<T>>
+    where
+        T: DeserializeOwned,
+    {
+        let status = response.status();
+        let body = response.text().await?;
+
+        if !status.is_success() {
+            logging::error(format_args!(
+                "Cloudflare non-2xx response method={method} path={path} status={} body={body}",
+                status.as_u16()
+            ));
+            return Err(DnsProviderError::HttpStatus {
+                status: status.as_u16(),
+                body,
+            });
+        }
+
+        serde_json::from_str(&body).map_err(DnsProviderError::Json)
+    }
 }
 
 impl CloudflareDnsProvider {
@@ -224,10 +245,10 @@ impl CloudflareDnsProvider {
             .bearer_auth(&self.api_token)
             .query(&[("name", &zone)])
             .send()
-            .await?
-            .error_for_status()?
-            .json::<CloudflareResponse<Vec<CloudflareZone>>>()
             .await?;
+
+        let zones: CloudflareResponse<Vec<CloudflareZone>> =
+            Self::decode_response(zones, "GET", "/zones?name=<zone>").await?;
 
         if !zones.success {
             let error = zones

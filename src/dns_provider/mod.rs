@@ -8,6 +8,12 @@ pub enum DnsProviderError {
     #[error("HTTP request failed: {0}")]
     Http(#[from] reqwest::Error),
 
+    #[error("HTTP request failed with status {status}: {body}")]
+    HttpStatus { status: u16, body: String },
+
+    #[error("failed to decode JSON response: {0}")]
+    Json(#[from] serde_json::Error),
+
     #[error("Cloudflare API error {code}: {message}")]
     Api { code: u32, message: String },
 
