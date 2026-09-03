@@ -156,8 +156,6 @@ pub fn build_desired_state(
     validate(config, services)?;
 
     let zone = zone(config);
-    let proxy_host = proxy_host(config);
-    let dns_record_type = dns_record_type(proxy_host);
     let certificate = wildcard_certificate_id
         .as_ref()
         .map(certificate_ref)
@@ -166,12 +164,16 @@ pub fn build_desired_state(
     let dns_records = services
         .services
         .values()
-        .map(|service| DnsRecord {
-            id: None,
-            name: service.domain.clone(),
-            record_type: dns_record_type.clone(),
-            value: proxy_host.to_owned(),
-            ttl: None,
+        .map(|service| {
+            let proxy_host = service_proxy_host(config, service);
+
+            DnsRecord {
+                id: None,
+                name: service.domain.clone(),
+                record_type: dns_record_type(proxy_host),
+                value: proxy_host.to_owned(),
+                ttl: None,
+            }
         })
         .collect();
 
@@ -335,6 +337,17 @@ fn validate_service(
     if service.upstream.host.trim().is_empty() {
         return Err(ReconcileError::InvalidConfig(format!(
             "service {name} has empty upstream host"
+        )));
+    }
+
+    if service
+        .proxy_host
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(str::is_empty)
+    {
+        return Err(ReconcileError::InvalidConfig(format!(
+            "service {name} has empty proxy host"
         )));
     }
 
@@ -631,6 +644,13 @@ fn proxy_host(config: &Config) -> &str {
     }
 }
 
+fn service_proxy_host<'a>(config: &'a Config, service: &'a ServiceConfig) -> &'a str {
+    service
+        .proxy_host
+        .as_deref()
+        .unwrap_or_else(|| proxy_host(config))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -713,6 +733,30 @@ mod tests {
         assert!(build_desired_state(&config, &services, None).is_err());
     }
 
+    #[test]
+    fn dns_records_use_service_proxy_host_when_present() {
+        let config = test_config("10.0.5.104");
+        let mut services = test_services([("tv", "tv.avel.space", false)]);
+        services.services.get_mut("tv").expect("service").proxy_host =
+            Some("edge.example.net".to_owned());
+
+        let desired = build_desired_state(&config, &services, None).expect("desired state");
+
+        assert_eq!(desired.dns_records[0].value, "edge.example.net");
+        assert_eq!(desired.dns_records[0].record_type, DnsRecordType::Cname);
+    }
+
+    #[test]
+    fn dns_records_fall_back_to_default_proxy_host() {
+        let config = test_config("10.0.5.104");
+        let services = test_services([("tv", "tv.avel.space", false)]);
+
+        let desired = build_desired_state(&config, &services, None).expect("desired state");
+
+        assert_eq!(desired.dns_records[0].value, "10.0.5.104");
+        assert_eq!(desired.dns_records[0].record_type, DnsRecordType::A);
+    }
+
     fn test_config(proxy_host: &str) -> Config {
         Config {
             dns: DnsConfig::Cloudflare {
@@ -739,6 +783,7 @@ mod tests {
                         name.to_owned(),
                         ServiceConfig {
                             domain: domain.to_owned(),
+                            proxy_host: None,
                             upstream: UpstreamConfig {
                                 host: "10.0.5.100".to_owned(),
                                 port: 8000,

@@ -1,6 +1,6 @@
 [package]
 name = "avel-pilot"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 authors = ["Davide Leva"]
 description = "Rust reconciler for Cloudflare DNS and Nginx Proxy Manager homelab services"

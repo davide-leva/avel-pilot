@@ -250,6 +250,10 @@ fn service_list(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             vec![
                 name.clone(),
                 service.domain.clone(),
+                service
+                    .proxy_host
+                    .clone()
+                    .unwrap_or_else(|| default_proxy_host(&files.config).to_owned()),
                 format!(
                     "{}://{}:{}",
                     upstream_scheme_name(&service.upstream.scheme),
@@ -261,7 +265,17 @@ fn service_list(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             ]
         })
         .collect::<Vec<_>>();
-    print_table(&["Name", "Domain", "Upstream", "TLS", "Websocket"], &rows);
+    print_table(
+        &[
+            "Name",
+            "Domain",
+            "DNS Target",
+            "Upstream",
+            "TLS",
+            "Websocket",
+        ],
+        &rows,
+    );
 
     Ok(())
 }
@@ -488,6 +502,7 @@ fn prompt_service(
     defaults: &ServiceConfig,
 ) -> Result<ServiceConfig, Box<dyn std::error::Error>> {
     let domain = prompt_required("Domain", Some(&defaults.domain))?;
+    let proxy_host = prompt_optional("DNS proxy host override", defaults.proxy_host.as_deref())?;
     let scheme = prompt_scheme("Upstream scheme", &defaults.upstream.scheme)?;
     let default_port = port_default(&scheme, defaults.upstream.port);
     let host = prompt_required("Upstream host", Some(&defaults.upstream.host))?;
@@ -498,6 +513,11 @@ fn prompt_service(
     println!();
     println!("  {} {}", paint("Name", Color::Bold), name);
     println!("  {} {}", paint("Domain", Color::Bold), domain);
+    println!(
+        "  {} {}",
+        paint("DNS proxy host", Color::Bold),
+        proxy_host.as_deref().unwrap_or("default")
+    );
     println!(
         "  {} {}://{}:{}",
         paint("Upstream", Color::Bold),
@@ -514,6 +534,7 @@ fn prompt_service(
 
     let service = ServiceConfig {
         domain,
+        proxy_host,
         upstream: UpstreamConfig { host, port, scheme },
         tls,
         websocket,
@@ -525,8 +546,9 @@ fn prompt_service(
 fn default_service(name: &str, config: &Config) -> ServiceConfig {
     ServiceConfig {
         domain: default_domain(name, zone(config)),
+        proxy_host: None,
         upstream: UpstreamConfig {
-            host: default_upstream_host(config).to_owned(),
+            host: default_proxy_host(config).to_owned(),
             port: 80,
             scheme: UpstreamSchemeConfig::Http,
         },
@@ -559,10 +581,20 @@ fn default_domain(name: &str, zone: &str) -> String {
     }
 }
 
-fn default_upstream_host(config: &Config) -> &str {
+fn default_proxy_host(config: &Config) -> &str {
     match &config.proxy {
         ProxyConfig::Npm { host, .. } => host,
     }
+}
+
+fn prompt_optional(
+    label: &str,
+    default: Option<&str>,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let value = prompt(label, default)?;
+    let value = value.trim();
+
+    Ok((!value.is_empty()).then(|| value.to_owned()))
 }
 
 fn prompt_bool(label: &str, default: bool) -> Result<bool, Box<dyn std::error::Error>> {
@@ -774,6 +806,8 @@ fn services_example(zone: &str) -> String {
 # services:
 #   jellyfin:
 #     domain: tv.{zone}
+#     # Optional: defaults to proxy.host from config.yml.
+#     # proxy_host: edge.example.com
 #     upstream:
 #       scheme: http
 #       host: 10.0.5.101

@@ -81,6 +81,7 @@ Proxy fields:
 services:
   jellyfin:
     domain: tv.avel.space
+    proxy_host: edge.avel.space
     upstream:
       scheme: http
       host: 10.0.5.101
@@ -108,13 +109,14 @@ avel-pilot service modify jellyfin
 avel-pilot service remove jellyfin
 ```
 
-`service add` uses sensible defaults from `config.yml`: `<name>.<zone>` for the domain, `proxy.host` as the initial upstream host, `http`, port `80`, TLS enabled, and websocket disabled. `service modify` uses the current service values as defaults.
+`service add` uses sensible defaults from `config.yml`: `<name>.<zone>` for the domain, no DNS proxy host override, `proxy.host` as the initial upstream host, `http`, port `80`, TLS enabled, and websocket disabled. `service modify` uses the current service values as defaults.
 
 `service add` and `service modify` verify the full services file before saving. If verification fails, no changes are written; Avel Pilot keeps the interactive session open so you can correct the values or abort.
 
 Service fields:
 
 - `domain`: public domain to publish
+- `proxy_host`: optional DNS target for this service; defaults to `proxy.host` from `config.yml`
 - `upstream.scheme`: `http` or `https`, default `http`
 - `upstream.host`: internal host reachable by NPM
 - `upstream.port`: internal port

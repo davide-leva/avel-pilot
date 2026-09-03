@@ -1,6 +1,8 @@
 services:
   jellyfin:
     domain: tv.example.com
+    # Optional: defaults to proxy.host from config.yml.
+    # proxy_host: edge.example.com
     upstream:
       scheme: http
       host: 10.0.5.101

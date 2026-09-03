@@ -72,6 +72,11 @@ pub struct ServicesFile {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct ServiceConfig {
     pub domain: String,
+
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy_host: Option<String>,
+
     pub upstream: UpstreamConfig,
 
     #[serde(default)]
