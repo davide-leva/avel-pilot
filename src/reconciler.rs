@@ -42,6 +42,14 @@ pub struct DesiredState {
     pub certificates: Vec<Certificate>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReconcilePlan {
+    pub desired: DesiredState,
+    pub dns_changes: Vec<DnsChange>,
+    pub proxy_changes: Vec<ProxyChange>,
+    pub certificate_changes: Vec<CertificateChange>,
+}
+
 pub async fn reconcile(
     config: &Config,
     services: &ServicesFile,
@@ -49,10 +57,6 @@ pub async fn reconcile(
     proxy_provider: &impl ProxyProvider,
     cert_provider: &impl CertProvider,
 ) -> Result<(), ReconcileError> {
-    logging::timed("validate configuration and services", || {
-        validate(config, services)
-    })?;
-
     let zone = zone(config);
     let dns01 = logging::timed("build DNS-01 provider config", || {
         dns01_provider_config(config, services, dns_provider)
@@ -62,8 +66,49 @@ pub async fn reconcile(
         ensure_wildcard_certificate(zone, services, dns01, cert_provider),
     )
     .await?;
+    let plan = plan_reconcile(
+        config,
+        services,
+        dns_provider,
+        proxy_provider,
+        certificate_id,
+    )
+    .await?;
+    logging::info(format_args!(
+        "DNS changes to apply: {}",
+        plan.dns_changes.len()
+    ));
+    for change in plan.dns_changes {
+        let operation = describe_dns_change(zone, &change);
+        logging::timed_async(operation, dns_provider.apply(zone, change)).await?;
+    }
+
+    logging::info(format_args!(
+        "Proxy changes to apply: {}",
+        plan.proxy_changes.len()
+    ));
+    for change in plan.proxy_changes {
+        let operation = describe_proxy_change(&change);
+        logging::timed_async(operation, proxy_provider.apply(change)).await?;
+    }
+
+    Ok(())
+}
+
+pub async fn plan_reconcile(
+    config: &Config,
+    services: &ServicesFile,
+    dns_provider: &impl DnsProvider,
+    proxy_provider: &impl ProxyProvider,
+    wildcard_certificate_id: Option<CertificateId>,
+) -> Result<ReconcilePlan, ReconcileError> {
+    logging::timed("validate configuration and services", || {
+        validate(config, services)
+    })?;
+
+    let zone = zone(config);
     let desired = logging::timed("build desired state", || {
-        build_desired_state(config, services, certificate_id)
+        build_desired_state(config, services, wildcard_certificate_id)
     })?;
     logging::info(format_args!(
         "Desired state dns_records={} proxy_hosts={} certificates={}",
@@ -84,11 +129,6 @@ pub async fn reconcile(
     let dns_changes = logging::timed("diff DNS records", || {
         Ok::<_, ReconcileError>(diff_dns_records(&desired.dns_records, &actual_dns))
     })?;
-    logging::info(format_args!("DNS changes to apply: {}", dns_changes.len()));
-    for change in dns_changes {
-        let operation = describe_dns_change(zone, &change);
-        logging::timed_async(operation, dns_provider.apply(zone, change)).await?;
-    }
 
     let actual_proxy =
         logging::timed_async("load managed proxy hosts", proxy_provider.hosts()).await?;
@@ -99,16 +139,13 @@ pub async fn reconcile(
     let proxy_changes = logging::timed("diff proxy hosts", || {
         Ok::<_, ReconcileError>(diff_proxy_hosts(&desired.proxy_hosts, &actual_proxy))
     })?;
-    logging::info(format_args!(
-        "Proxy changes to apply: {}",
-        proxy_changes.len()
-    ));
-    for change in proxy_changes {
-        let operation = describe_proxy_change(&change);
-        logging::timed_async(operation, proxy_provider.apply(change)).await?;
-    }
 
-    Ok(())
+    Ok(ReconcilePlan {
+        desired,
+        dns_changes,
+        proxy_changes,
+        certificate_changes: Vec::new(),
+    })
 }
 
 pub fn build_desired_state(
@@ -266,7 +303,7 @@ pub fn diff_certificates(
         .collect()
 }
 
-fn validate(config: &Config, services: &ServicesFile) -> Result<(), ReconcileError> {
+pub fn validate(config: &Config, services: &ServicesFile) -> Result<(), ReconcileError> {
     if proxy_host(config).trim().is_empty() {
         return Err(ReconcileError::InvalidConfig(
             "proxy.host is empty".to_owned(),
@@ -379,7 +416,7 @@ async fn ensure_wildcard_certificate(
         .map(Some)
 }
 
-fn describe_dns_change(zone: &str, change: &DnsChange) -> String {
+pub fn describe_dns_change(zone: &str, change: &DnsChange) -> String {
     match change {
         DnsChange::Create(record) => format!(
             "create DNS record zone={zone} name={} type={} value={}",
@@ -400,7 +437,7 @@ fn describe_dns_change(zone: &str, change: &DnsChange) -> String {
     }
 }
 
-fn describe_proxy_change(change: &ProxyChange) -> String {
+pub fn describe_proxy_change(change: &ProxyChange) -> String {
     match change {
         ProxyChange::Create(host) => format!(
             "create proxy host domains={} upstream={}://{}:{} tls={} websocket={}",
@@ -425,7 +462,7 @@ fn describe_proxy_change(change: &ProxyChange) -> String {
     }
 }
 
-fn describe_certificate_change(change: &CertificateChange) -> String {
+pub fn describe_certificate_change(change: &CertificateChange) -> String {
     match change {
         CertificateChange::Create(certificate) => {
             format!(
@@ -548,6 +585,13 @@ fn wildcard_domain(zone: &str) -> String {
     format!("*.{zone}")
 }
 
+pub fn existing_wildcard_certificate_id(
+    zone: &str,
+    certificates: &[Certificate],
+) -> Option<CertificateId> {
+    find_certificate_id(certificates, &[wildcard_domain(zone)])
+}
+
 fn domain_in_zone(domain: &str, zone: &str) -> bool {
     domain == zone || domain.ends_with(&format!(".{zone}"))
 }
@@ -575,7 +619,7 @@ fn upstream_scheme(scheme: &UpstreamSchemeConfig) -> UpstreamScheme {
     }
 }
 
-fn zone(config: &Config) -> &str {
+pub fn zone(config: &Config) -> &str {
     match &config.dns {
         DnsConfig::Cloudflare { zone, .. } => zone,
     }

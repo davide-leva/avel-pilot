@@ -117,6 +117,12 @@ pub struct CloudflareDnsProvider {
     zone_cache: Arc<RwLock<HashMap<String, String>>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CloudflareDnsSummary {
+    pub managed: usize,
+    pub unmanaged: usize,
+}
+
 impl CloudflareDnsProvider {
     pub fn new(api_token: impl Into<String>) -> Self {
         Self {
@@ -284,13 +290,16 @@ impl CloudflareDnsProvider {
 
 impl CloudflareDnsProvider {
     // TODO: Use a better pagination strategy
+    async fn list_raw_records(&self, zone_id: &str) -> DnsProviderResult<Vec<CloudflareRecord>> {
+        self.request(
+            Method::GET,
+            &format!("/zones/{zone_id}/dns_records?per_page=5000"),
+        )
+        .await
+    }
+
     async fn list_records(&self, zone_id: &str) -> DnsProviderResult<Vec<DnsRecord>> {
-        let records: Vec<CloudflareRecord> = self
-            .request(
-                Method::GET,
-                &format!("/zones/{zone_id}/dns_records?per_page=5000"),
-            )
-            .await?;
+        let records: Vec<CloudflareRecord> = self.list_raw_records(zone_id).await?;
 
         records
             .into_iter()
@@ -343,6 +352,17 @@ impl CloudflareDnsProvider {
             .await?;
 
         Ok(())
+    }
+
+    pub async fn summary(&self, zone: &str) -> DnsProviderResult<CloudflareDnsSummary> {
+        let zone_id = self.resolve_zone_id(zone).await?;
+        let records = self.list_raw_records(&zone_id).await?;
+        let managed = records.iter().filter(|record| record.is_managed()).count();
+
+        Ok(CloudflareDnsSummary {
+            managed,
+            unmanaged: records.len().saturating_sub(managed),
+        })
     }
 }
 

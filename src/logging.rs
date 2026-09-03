@@ -1,18 +1,34 @@
 use std::{
     fmt::Display,
     future::Future,
+    sync::atomic::{AtomicBool, Ordering},
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
+static ENABLED: AtomicBool = AtomicBool::new(true);
+
+pub fn set_enabled(enabled: bool) {
+    ENABLED.store(enabled, Ordering::Relaxed);
+}
+
 pub fn info(message: impl Display) {
+    if !ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
     println!("{} INFO  {message}", timestamp());
 }
 
 pub fn error(message: impl Display) {
+    if !ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
     eprintln!("{} ERROR {message}", timestamp());
 }
 
 pub fn warn(message: impl Display) {
+    if !ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
     eprintln!("{} WARN  {message}", timestamp());
 }
 

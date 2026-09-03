@@ -58,6 +58,7 @@ pub struct Dns01Challenge {
     pub propagation_seconds: Option<u32>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CertificateChange {
     Create(Certificate),
     Renew { id: CertificateId },

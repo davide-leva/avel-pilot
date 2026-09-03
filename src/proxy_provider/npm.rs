@@ -257,6 +257,14 @@ pub struct NPMProxyProvider {
     token: RwLock<Option<String>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NpmSummary {
+    pub proxy_managed: usize,
+    pub proxy_unmanaged: usize,
+    pub ssl_managed: usize,
+    pub ssl_unmanaged: usize,
+}
+
 impl NPMProxyProvider {
     pub fn new(
         base_url: impl Into<String>,
@@ -465,6 +473,31 @@ impl NPMProxyProvider {
             .await?;
 
         Ok(())
+    }
+
+    pub async fn summary(&self) -> ProxyResult<NpmSummary> {
+        let hosts = self
+            .request::<Vec<NpmProxyHost>>(Method::GET, "/api/nginx/proxy-hosts")
+            .await?;
+        let certificates = self
+            .request::<Vec<NpmCertificate>>(Method::GET, "/api/nginx/certificates")
+            .await?;
+        let proxy_managed = hosts.iter().filter(|host| host.is_managed()).count();
+        let ssl_managed = certificates
+            .iter()
+            .filter(|certificate| {
+                certificate.provider == "letsencrypt"
+                    && certificate
+                        .nice_name
+                        .contains(MANAGED_CERTIFICATE_NAME_MARKER)
+            })
+            .count();
+        Ok(NpmSummary {
+            proxy_managed,
+            proxy_unmanaged: hosts.len().saturating_sub(proxy_managed),
+            ssl_managed,
+            ssl_unmanaged: certificates.len().saturating_sub(ssl_managed),
+        })
     }
 }
 

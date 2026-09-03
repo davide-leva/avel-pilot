@@ -69,6 +69,7 @@ impl DnsRecordType {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DnsChange {
     Create(DnsRecord),
     Update { id: DnsRecordId, record: DnsRecord },

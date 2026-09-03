@@ -1,134 +1,425 @@
 use std::{
     fs,
     io::{self, Write},
-    path::Path,
-    time::{Duration, SystemTime},
+    path::{Path, PathBuf},
 };
 
 use avel_pilot::{
+    cert_provider::CertProvider,
     config::{
-        CertificateConfig, Config, DnsConfig, ProxyConfig, ServicesFile, load_app_files, load_yaml,
+        CertificateConfig, Config, DnsConfig, ProxyConfig, ServiceConfig, ServicesFile,
+        UpstreamConfig, UpstreamSchemeConfig, load_app_files,
     },
-    dns_provider::cloudflare::CloudflareDnsProvider,
+    dns_provider::{DnsChange, cloudflare::CloudflareDnsProvider},
     logging,
-    proxy_provider::npm::NPMProxyProvider,
-    reconciler::reconcile,
+    proxy_provider::{ProxyChange, npm::NPMProxyProvider},
+    reconciler::{
+        ReconcilePlan, build_desired_state, describe_dns_change, describe_proxy_change,
+        diff_certificates, existing_wildcard_certificate_id, plan_reconcile, reconcile, validate,
+        zone,
+    },
 };
-use tokio::time;
+use clap::{Parser, Subcommand};
+use reqwest::header::{ACCEPT, USER_AGENT};
+use serde::Deserialize;
 
-const DEFAULT_CONFIG_PATH: &str = "/etc/avel-pilot/config.yml";
-const DEFAULT_SERVICES_PATH: &str = "/etc/avel-pilot/services.yml";
-const WATCH_INTERVAL: Duration = Duration::from_secs(2);
-const SYSTEM_CONFIG_PATH: &str = "/etc/avel-pilot/config.yml";
-const SYSTEM_SERVICES_PATH: &str = "/etc/avel-pilot/services.yml";
+const DEFAULT_CONFIG_PATH: &str = "~/.config/avel-pilot/config.yml";
+const DEFAULT_SERVICES_PATH: &str = "~/.config/avel-pilot/services.yml";
+const GITHUB_REPO: &str = "davide-leva/avel-pilot";
+const UPDATE_ASSET: &str = "avel-pilot-linux-amd64";
+
+#[derive(Debug, Parser)]
+#[command(
+    name = "avel-pilot",
+    version,
+    about = "Manage Cloudflare DNS and Nginx Proxy Manager hosts from YAML.",
+    after_help = "Every command except update checks GitHub for a newer Avel Pilot release."
+)]
+struct Cli {
+    #[arg(
+        long,
+        global = true,
+        env = "AVEL_PILOT_CONFIG",
+        default_value = DEFAULT_CONFIG_PATH,
+        help = "Path to config.yml"
+    )]
+    config: String,
+
+    #[arg(
+        long,
+        global = true,
+        env = "AVEL_PILOT_SERVICES",
+        default_value = DEFAULT_SERVICES_PATH,
+        help = "Path to services.yml"
+    )]
+    services: String,
+
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Debug, Subcommand)]
+enum Commands {
+    #[command(about = "Create config and services files interactively.")]
+    Init,
+
+    #[command(about = "Show managed and unmanaged Cloudflare/NPM resource counts.")]
+    Status,
+
+    #[command(about = "Show the changes Avel Pilot would apply.")]
+    Diff,
+
+    #[command(about = "Validate config.yml and services.yml without contacting providers.")]
+    Validate,
+
+    #[command(about = "Download and install the latest GitHub release binary.")]
+    Update,
+
+    #[command(about = "Apply the desired state once and exit.")]
+    Apply,
+
+    #[command(about = "Manage services.yml entries interactively.")]
+    Service {
+        #[command(subcommand)]
+        command: ServiceCommands,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ServiceCommands {
+    #[command(about = "List services declared in services.yml.")]
+    List,
+
+    #[command(about = "Add a service to services.yml with interactive prompts.")]
+    Add {
+        #[arg(help = "Service name to add")]
+        name: Option<String>,
+    },
+
+    #[command(about = "Remove a service from services.yml with confirmation.")]
+    Remove {
+        #[arg(help = "Service name to remove")]
+        name: Option<String>,
+    },
+
+    #[command(about = "Modify a service in services.yml with interactive prompts.")]
+    Modify {
+        #[arg(help = "Service name to modify")]
+        name: Option<String>,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubRelease {
+    tag_name: String,
+    html_url: String,
+    assets: Vec<GitHubAsset>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubAsset {
+    name: String,
+    browser_download_url: String,
+}
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    if std::env::args().nth(1).as_deref() == Some("init") {
-        init_config()?;
-        return Ok(());
-    }
+async fn main() {
+    logging::set_enabled(false);
 
-    let config_path =
-        std::env::var("AVEL_PILOT_CONFIG").unwrap_or_else(|_| DEFAULT_CONFIG_PATH.to_owned());
-    let services_path =
-        std::env::var("AVEL_PILOT_SERVICES").unwrap_or_else(|_| DEFAULT_SERVICES_PATH.to_owned());
-    logging::info(format_args!(
-        "Using config_path={config_path} services_path={services_path}"
-    ));
+    let cli = Cli::parse();
+    let result = async {
+        print_header();
 
-    logging::timed(format!("check config file {config_path}"), || {
-        ensure_runtime_file(&config_path, "config")
-    })?;
-    logging::timed(format!("check services file {services_path}"), || {
-        ensure_runtime_file(&services_path, "services")
-    })?;
-
-    let files = logging::timed(
-        format!("load app files from {config_path} and {services_path}"),
-        || load_app_files(&config_path, &services_path),
-    )?;
-    let config = files.config;
-    let mut services = files.services;
-    let mut services_modified_at =
-        logging::timed(format!("read modified time for {services_path}"), || {
-            modified_at(&services_path)
-        })?;
-
-    run_reconcile(&config, &services).await;
-    logging::info(format_args!("Watching {services_path} for changes"));
-
-    let mut interval = time::interval(WATCH_INTERVAL);
-    let shutdown = shutdown_signal();
-    tokio::pin!(shutdown);
-
-    loop {
-        tokio::select! {
-            result = &mut shutdown => {
-                result?;
-                logging::info("Shutting down");
-                break;
-            }
-            _ = interval.tick() => {
-                let modified_at = logging::timed(format!("read modified time for {services_path}"), || {
-                    modified_at(&services_path)
-                })?;
-                if modified_at <= services_modified_at {
-                    continue;
-                }
-
-                services_modified_at = modified_at;
-                match logging::timed(format!("reload services from {services_path}"), || {
-                    load_yaml::<ServicesFile>(&services_path)
-                }) {
-                    Ok(next_services) => {
-                        services = next_services;
-                        run_reconcile(&config, &services).await;
-                    }
-                    Err(error) => {
-                        logging::error(format_args!("Failed to reload {services_path}: {error}"));
-                    }
-                }
-            }
+        if !matches!(cli.command, Commands::Update) {
+            update_check().await;
         }
+
+        match &cli.command {
+            Commands::Init => init_config(&cli),
+            Commands::Status => status(&cli).await,
+            Commands::Diff => diff(&cli).await,
+            Commands::Validate => validate_files(&cli),
+            Commands::Update => update().await,
+            Commands::Apply => apply(&cli).await,
+            Commands::Service { command } => manage_service(&cli, command),
+        }
+    }
+    .await;
+
+    if let Err(error) = result {
+        print_error(&error.to_string());
+        std::process::exit(1);
+    }
+}
+
+async fn status(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+    let files = load_required_files(cli)?;
+    let (dns_provider, proxy_provider) = providers(&files.config);
+    let dns = dns_provider.summary(zone(&files.config)).await?;
+    let npm = proxy_provider.summary().await?;
+
+    section("Status");
+    row("Cloudflare DNS managed", dns.managed);
+    row("Cloudflare DNS unmanaged", dns.unmanaged);
+    row("NPM proxy managed", npm.proxy_managed);
+    row("NPM proxy unmanaged", npm.proxy_unmanaged);
+    row("NPM SSL managed", npm.ssl_managed);
+    row("NPM SSL unmanaged", npm.ssl_unmanaged);
+    ok("Status loaded successfully.");
+
+    Ok(())
+}
+
+async fn diff(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+    let files = load_required_files(cli)?;
+    let (dns_provider, proxy_provider) = providers(&files.config);
+    let plan = build_plan(
+        &files.config,
+        &files.services,
+        &dns_provider,
+        &proxy_provider,
+    )
+    .await?;
+
+    section("Diff");
+    print_dns_changes(zone(&files.config), &plan.dns_changes);
+    print_proxy_changes(&plan.proxy_changes);
+    print_certificate_changes(plan.certificate_changes.len());
+
+    let total = plan.dns_changes.len() + plan.proxy_changes.len() + plan.certificate_changes.len();
+    if total == 0 {
+        ok("Everything is already in sync.");
+    } else {
+        warn(&format!("{total} change(s) pending."));
     }
 
     Ok(())
 }
 
-async fn run_reconcile(config: &Config, services: &ServicesFile) {
-    let (dns_provider, proxy_provider) =
-        match logging::timed("initialize providers", || providers(config)) {
-            Ok(providers) => providers,
-            Err(error) => {
-                logging::error(format_args!("Failed to initialize providers: {error}"));
-                return;
-            }
-        };
+fn validate_files(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+    let files = load_required_files(cli)?;
+    validate(&files.config, &files.services)?;
 
-    match logging::timed_async(
-        format!("reconcile {} services", services.services.len()),
-        reconcile(
-            config,
-            services,
-            &dns_provider,
-            &proxy_provider,
-            &proxy_provider,
-        ),
-    )
-    .await
-    {
-        Ok(()) => logging::info(format_args!(
-            "Reconcile completed for {} services",
-            services.services.len()
-        )),
-        Err(error) => logging::error(format_args!("Reconcile failed: {error}")),
+    section("Validate");
+    row("Services", files.services.services.len());
+    ok("Configuration is valid.");
+
+    Ok(())
+}
+
+fn manage_service(cli: &Cli, command: &ServiceCommands) -> Result<(), Box<dyn std::error::Error>> {
+    match command {
+        ServiceCommands::List => service_list(cli),
+        ServiceCommands::Add { name } => service_add(cli, name.as_deref()),
+        ServiceCommands::Remove { name } => service_remove(cli, name.as_deref()),
+        ServiceCommands::Modify { name } => service_modify(cli, name.as_deref()),
     }
 }
 
-fn providers(
+fn service_list(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+    let files = load_required_files(cli)?;
+
+    section("Services");
+    if files.services.services.is_empty() {
+        println!("  {}", paint("No services declared", Color::Dim));
+        return Ok(());
+    }
+
+    println!(
+        "  {:<18} {:<30} {:<24} {:<5} {:<9}",
+        "Name", "Domain", "Upstream", "TLS", "Websocket"
+    );
+    for (name, service) in &files.services.services {
+        println!(
+            "  {:<18} {:<30} {:<24} {:<5} {:<9}",
+            name,
+            service.domain,
+            format!(
+                "{}://{}:{}",
+                upstream_scheme_name(&service.upstream.scheme),
+                service.upstream.host,
+                service.upstream.port
+            ),
+            yes_no(service.tls),
+            yes_no(service.websocket)
+        );
+    }
+
+    Ok(())
+}
+
+fn service_add(cli: &Cli, name: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+    let mut files = load_required_files(cli)?;
+    let services_path = services_path(cli)?;
+    let name = service_name_from_arg_or_prompt(name, None)?;
+
+    if files.services.services.contains_key(&name) {
+        return Err(format!("service already exists: {name}").into());
+    }
+
+    section("Add Service");
+    let service = prompt_verified_service(&name, &files.config, &files.services, None)?;
+    files.services.services.insert(name.clone(), service);
+    save_services(&services_path, &files.services)?;
+    ok(&format!("Added service `{name}`."));
+
+    Ok(())
+}
+
+fn service_remove(cli: &Cli, name: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+    let mut files = load_required_files(cli)?;
+    let services_path = services_path(cli)?;
+    let name = service_name_from_arg_or_prompt(name, None)?;
+
+    if !files.services.services.contains_key(&name) {
+        return Err(format!("service not found: {name}").into());
+    }
+
+    section("Remove Service");
+    if !confirm(&format!("Remove service `{name}`?"), false)? {
+        warn("Aborted.");
+        return Ok(());
+    }
+
+    files.services.services.remove(&name);
+    validate(&files.config, &files.services)?;
+    save_services(&services_path, &files.services)?;
+    ok(&format!("Removed service `{name}`."));
+
+    Ok(())
+}
+
+fn service_modify(cli: &Cli, name: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+    let mut files = load_required_files(cli)?;
+    let services_path = services_path(cli)?;
+    let name = service_name_from_arg_or_prompt(name, None)?;
+    let current = files
+        .services
+        .services
+        .get(&name)
+        .cloned()
+        .ok_or_else(|| format!("service not found: {name}"))?;
+
+    section("Modify Service");
+    let service = prompt_verified_service(&name, &files.config, &files.services, Some(&current))?;
+    files.services.services.insert(name.clone(), service);
+    save_services(&services_path, &files.services)?;
+    ok(&format!("Updated service `{name}`."));
+
+    Ok(())
+}
+
+async fn apply(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+    let files = load_required_files(cli)?;
+    let (dns_provider, proxy_provider) = providers(&files.config);
+
+    section("Apply");
+    reconcile(
+        &files.config,
+        &files.services,
+        &dns_provider,
+        &proxy_provider,
+        &proxy_provider,
+    )
+    .await?;
+    ok("Desired state applied.");
+
+    Ok(())
+}
+
+async fn update() -> Result<(), Box<dyn std::error::Error>> {
+    section("Update");
+    let release = latest_release().await?;
+    let current = env!("CARGO_PKG_VERSION");
+    let latest = release.tag_name.trim_start_matches('v');
+
+    if latest == current || !version_is_newer(latest, current) {
+        ok(&format!("Avel Pilot is already up to date ({current})."));
+        return Ok(());
+    }
+
+    let asset = release
+        .assets
+        .iter()
+        .find(|asset| asset.name == UPDATE_ASSET)
+        .ok_or_else(|| format!("release asset not found: {UPDATE_ASSET}"))?;
+    warn(&format!(
+        "Updating {current} -> {latest} from {}",
+        release.html_url
+    ));
+
+    let bytes = reqwest::get(&asset.browser_download_url)
+        .await?
+        .bytes()
+        .await?;
+    let current_exe = std::env::current_exe()?;
+    let tmp = update_temp_path(&current_exe);
+    fs::write(&tmp, bytes)?;
+    set_executable(&tmp)?;
+    fs::rename(&tmp, &current_exe)?;
+
+    ok(&format!("Updated Avel Pilot to {latest}."));
+    Ok(())
+}
+
+async fn build_plan(
     config: &Config,
-) -> Result<(CloudflareDnsProvider, NPMProxyProvider), Box<dyn std::error::Error>> {
+    services: &ServicesFile,
+    dns_provider: &CloudflareDnsProvider,
+    proxy_provider: &NPMProxyProvider,
+) -> Result<ReconcilePlan, Box<dyn std::error::Error>> {
+    validate(config, services)?;
+
+    let actual_certificates = proxy_provider.certificates().await?;
+    let needs_tls = services.services.values().any(|service| service.tls);
+    let certificate_id = existing_wildcard_certificate_id(zone(config), &actual_certificates)
+        .or_else(|| needs_tls.then(|| avel_pilot::cert_provider::CertificateId("0".to_owned())));
+    let mut plan = plan_reconcile(
+        config,
+        services,
+        dns_provider,
+        proxy_provider,
+        certificate_id,
+    )
+    .await?;
+
+    let certificate_desired = build_desired_state(config, services, None)?.certificates;
+    plan.certificate_changes = diff_certificates(&certificate_desired, &actual_certificates);
+
+    Ok(plan)
+}
+
+fn load_required_files(
+    cli: &Cli,
+) -> Result<avel_pilot::config::AppFiles, Box<dyn std::error::Error>> {
+    let config_path = config_path(cli)?;
+    let services_path = services_path(cli)?;
+
+    ensure_runtime_file(&config_path, "config")?;
+    ensure_runtime_file(&services_path, "services")?;
+
+    Ok(load_app_files(&config_path, &services_path)?)
+}
+
+fn config_path(cli: &Cli) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    expand_home(&cli.config)
+}
+
+fn services_path(cli: &Cli) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    expand_home(&cli.services)
+}
+
+fn save_services(path: &Path, services: &ServicesFile) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    fs::write(path, serde_yaml::to_string(services)?)?;
+
+    Ok(())
+}
+
+fn providers(config: &Config) -> (CloudflareDnsProvider, NPMProxyProvider) {
     let dns_provider = match &config.dns {
         DnsConfig::Cloudflare { api_token, .. } => CloudflareDnsProvider::new(api_token.clone()),
     };
@@ -142,30 +433,243 @@ fn providers(
         } => NPMProxyProvider::new(url.clone(), identity.clone(), secret.clone()),
     };
 
-    Ok((dns_provider, proxy_provider))
+    (dns_provider, proxy_provider)
 }
 
-fn ensure_runtime_file(path: &str, kind: &str) -> Result<(), Box<dyn std::error::Error>> {
-    if Path::new(path).exists() {
+fn prompt_verified_service(
+    name: &str,
+    config: &Config,
+    services: &ServicesFile,
+    current: Option<&ServiceConfig>,
+) -> Result<ServiceConfig, Box<dyn std::error::Error>> {
+    let mut defaults = current
+        .cloned()
+        .unwrap_or_else(|| default_service(name, config));
+
+    loop {
+        let service = prompt_service(name, &defaults)?;
+        let mut candidate = services.clone();
+        candidate.services.insert(name.to_owned(), service.clone());
+
+        sub_section("Verify");
+        match validate(config, &candidate) {
+            Ok(()) => return Ok(service),
+            Err(error) => {
+                print_error(&format!("Service is not valid: {error}"));
+                if !confirm("Edit values and try again?", true)? {
+                    return Err("service edit aborted".into());
+                }
+                defaults = service;
+            }
+        }
+    }
+}
+
+fn prompt_service(
+    name: &str,
+    defaults: &ServiceConfig,
+) -> Result<ServiceConfig, Box<dyn std::error::Error>> {
+    let domain = prompt_required("Domain", Some(&defaults.domain))?;
+    let scheme = prompt_scheme("Upstream scheme", &defaults.upstream.scheme)?;
+    let default_port = port_default(&scheme, defaults.upstream.port);
+    let host = prompt_required("Upstream host", Some(&defaults.upstream.host))?;
+    let port = prompt_u16("Upstream port", default_port)?;
+    let tls = prompt_bool("TLS", defaults.tls)?;
+    let websocket = prompt_bool("Websocket", defaults.websocket)?;
+
+    println!();
+    println!("  {} {}", paint("Name", Color::Bold), name);
+    println!("  {} {}", paint("Domain", Color::Bold), domain);
+    println!(
+        "  {} {}://{}:{}",
+        paint("Upstream", Color::Bold),
+        upstream_scheme_name(&scheme),
+        host,
+        port
+    );
+    println!("  {} {}", paint("TLS", Color::Bold), yes_no(tls));
+    println!(
+        "  {} {}",
+        paint("Websocket", Color::Bold),
+        yes_no(websocket)
+    );
+
+    let service = ServiceConfig {
+        domain,
+        upstream: UpstreamConfig { host, port, scheme },
+        tls,
+        websocket,
+    };
+
+    Ok(service)
+}
+
+fn default_service(name: &str, config: &Config) -> ServiceConfig {
+    ServiceConfig {
+        domain: default_domain(name, zone(config)),
+        upstream: UpstreamConfig {
+            host: default_upstream_host(config).to_owned(),
+            port: 80,
+            scheme: UpstreamSchemeConfig::Http,
+        },
+        tls: true,
+        websocket: false,
+    }
+}
+
+fn service_name_from_arg_or_prompt(
+    name: Option<&str>,
+    default: Option<&str>,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let name = match name {
+        Some(name) => name.trim().to_owned(),
+        None => prompt_required("Service name", default)?,
+    };
+
+    if name.is_empty() {
+        return Err("service name cannot be empty".into());
+    }
+
+    Ok(name)
+}
+
+fn default_domain(name: &str, zone: &str) -> String {
+    if name.contains('.') {
+        name.to_owned()
+    } else {
+        format!("{name}.{zone}")
+    }
+}
+
+fn default_upstream_host(config: &Config) -> &str {
+    match &config.proxy {
+        ProxyConfig::Npm { host, .. } => host,
+    }
+}
+
+fn prompt_bool(label: &str, default: bool) -> Result<bool, Box<dyn std::error::Error>> {
+    loop {
+        let value = prompt(label, Some(if default { "yes" } else { "no" }))?;
+        match value.to_ascii_lowercase().as_str() {
+            "y" | "yes" | "true" | "1" => return Ok(true),
+            "n" | "no" | "false" | "0" => return Ok(false),
+            _ => print_error(&format!("{label} must be yes or no")),
+        }
+    }
+}
+
+fn prompt_u16(label: &str, default: u16) -> Result<u16, Box<dyn std::error::Error>> {
+    loop {
+        let value = prompt(label, Some(&default.to_string()))?;
+        match value.parse::<u16>() {
+            Ok(port) if port > 0 => return Ok(port),
+            _ => print_error(&format!("{label} must be a port between 1 and 65535")),
+        }
+    }
+}
+
+fn prompt_scheme(
+    label: &str,
+    default: &UpstreamSchemeConfig,
+) -> Result<UpstreamSchemeConfig, Box<dyn std::error::Error>> {
+    loop {
+        let value = prompt(label, Some(upstream_scheme_name(default)))?;
+        match value.to_ascii_lowercase().as_str() {
+            "http" => return Ok(UpstreamSchemeConfig::Http),
+            "https" => return Ok(UpstreamSchemeConfig::Https),
+            _ => print_error(&format!("{label} must be http or https")),
+        }
+    }
+}
+
+fn port_default(scheme: &UpstreamSchemeConfig, current: u16) -> u16 {
+    if current != 0 {
+        return current;
+    }
+
+    match scheme {
+        UpstreamSchemeConfig::Http => 80,
+        UpstreamSchemeConfig::Https => 443,
+    }
+}
+
+fn upstream_scheme_name(scheme: &UpstreamSchemeConfig) -> &'static str {
+    match scheme {
+        UpstreamSchemeConfig::Http => "http",
+        UpstreamSchemeConfig::Https => "https",
+    }
+}
+
+fn yes_no(value: bool) -> &'static str {
+    if value { "yes" } else { "no" }
+}
+
+fn ensure_runtime_file(path: &Path, kind: &str) -> Result<(), Box<dyn std::error::Error>> {
+    if path.exists() {
         return Ok(());
     }
 
-    Err(format!("{kind} file not found at {path}. Run `sudo avel-pilot init` first.").into())
+    Err(format!(
+        "{kind} file not found at {}. Run `avel-pilot init` first.",
+        path.display()
+    )
+    .into())
 }
 
-fn init_config() -> Result<(), Box<dyn std::error::Error>> {
-    logging::info(format_args!(
-        "Creating {SYSTEM_CONFIG_PATH} and {SYSTEM_SERVICES_PATH}"
-    ));
+async fn update_check() {
+    match latest_release().await {
+        Ok(release) => {
+            let current = env!("CARGO_PKG_VERSION");
+            let latest = release.tag_name.trim_start_matches('v');
+            if version_is_newer(latest, current) {
+                println!(
+                    "{} Avel Pilot {latest} is available. Run `avel-pilot update`.",
+                    paint("UPDATE", Color::Yellow)
+                );
+            }
+        }
+        Err(error) => {
+            println!(
+                "{} Update check skipped: {error}",
+                paint("UPDATE", Color::Dim)
+            );
+        }
+    }
+}
 
-    let config_path = Path::new(SYSTEM_CONFIG_PATH);
-    let services_path = Path::new(SYSTEM_SERVICES_PATH);
+async fn latest_release() -> Result<GitHubRelease, Box<dyn std::error::Error>> {
+    let client = reqwest::Client::new();
+    let release = client
+        .get(format!(
+            "https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+        ))
+        .header(USER_AGENT, "avel-pilot")
+        .header(ACCEPT, "application/vnd.github+json")
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<GitHubRelease>()
+        .await?;
+
+    Ok(release)
+}
+
+fn init_config(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+    section("Init");
+    let config_path = expand_home(&cli.config)?;
+    let services_path = expand_home(&cli.services)?;
+    println!(
+        "Creating {} and {}",
+        config_path.display(),
+        services_path.display()
+    );
+
     if config_path.exists() && !confirm("Config already exists. Overwrite?", false)? {
-        logging::warn("Aborted");
+        warn("Aborted.");
         return Ok(());
     }
     if services_path.exists() && !confirm("Services file already exists. Overwrite?", false)? {
-        logging::warn("Aborted");
+        warn("Aborted.");
         return Ok(());
     }
 
@@ -196,24 +700,17 @@ fn init_config() -> Result<(), Box<dyn std::error::Error>> {
     let content = serde_yaml::to_string(&config)?;
 
     if let Some(parent) = config_path.parent() {
-        logging::timed(
-            format!("create config directory {}", parent.display()),
-            || fs::create_dir_all(parent),
-        )?;
+        fs::create_dir_all(parent)?;
+    }
+    if let Some(parent) = services_path.parent() {
+        fs::create_dir_all(parent)?;
     }
 
-    logging::timed(format!("write {SYSTEM_CONFIG_PATH}"), || {
-        fs::write(config_path, content)
-    })?;
-    logging::timed(format!("write {SYSTEM_SERVICES_PATH}"), || {
-        fs::write(services_path, services_example(&zone))
-    })?;
-    logging::timed(
-        format!("set private permissions on {SYSTEM_CONFIG_PATH}"),
-        || set_private_permissions(config_path),
-    )?;
-    logging::info(format_args!("Wrote {SYSTEM_CONFIG_PATH}"));
-    logging::info(format_args!("Wrote {SYSTEM_SERVICES_PATH}"));
+    fs::write(&config_path, content)?;
+    fs::write(&services_path, services_example(&zone))?;
+    set_private_permissions(&config_path)?;
+    ok(&format!("Wrote {}", config_path.display()));
+    ok(&format!("Wrote {}", services_path.display()));
 
     Ok(())
 }
@@ -231,6 +728,22 @@ fn set_private_permissions(path: &Path) -> Result<(), Box<dyn std::error::Error>
 
 #[cfg(not(unix))]
 fn set_private_permissions(_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_executable(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut permissions = fs::metadata(path)?.permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(path, permissions)?;
+
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_executable(_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
@@ -264,7 +777,7 @@ fn prompt_required(
             return Ok(value);
         }
 
-        logging::error(format_args!("{label} is required"));
+        print_error(&format!("{label} is required"));
     }
 }
 
@@ -301,27 +814,133 @@ fn confirm(label: &str, default: bool) -> Result<bool, io::Error> {
     })
 }
 
-fn modified_at(path: impl AsRef<Path>) -> Result<SystemTime, std::io::Error> {
-    fs::metadata(path)?.modified()
-}
-
-#[cfg(unix)]
-async fn shutdown_signal() -> Result<(), Box<dyn std::error::Error>> {
-    use tokio::signal::unix::{SignalKind, signal};
-
-    let mut terminate = signal(SignalKind::terminate())?;
-
-    tokio::select! {
-        result = tokio::signal::ctrl_c() => result?,
-        _ = terminate.recv() => {},
+fn print_dns_changes(zone: &str, changes: &[DnsChange]) {
+    sub_section("Cloudflare DNS");
+    if changes.is_empty() {
+        println!("  {}", paint("No changes", Color::Green));
+        return;
     }
 
-    Ok(())
+    for change in changes {
+        println!("  - {}", describe_dns_change(zone, change));
+    }
 }
 
-#[cfg(not(unix))]
-async fn shutdown_signal() -> Result<(), Box<dyn std::error::Error>> {
-    tokio::signal::ctrl_c().await?;
+fn print_proxy_changes(changes: &[ProxyChange]) {
+    sub_section("NPM Proxy");
+    if changes.is_empty() {
+        println!("  {}", paint("No changes", Color::Green));
+        return;
+    }
 
-    Ok(())
+    for change in changes {
+        println!("  - {}", describe_proxy_change(change));
+    }
+}
+
+fn print_certificate_changes(count: usize) {
+    sub_section("NPM SSL");
+    if count == 0 {
+        println!("  {}", paint("No changes", Color::Green));
+    } else {
+        println!("  - {count} certificate change(s)");
+    }
+}
+
+fn update_temp_path(current_exe: &Path) -> PathBuf {
+    let mut tmp = current_exe.to_path_buf();
+    tmp.set_extension("avel-pilot-update");
+    tmp
+}
+
+fn expand_home(path: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    if path == "~" {
+        return home_dir();
+    }
+
+    if let Some(rest) = path.strip_prefix("~/") {
+        return Ok(home_dir()?.join(rest));
+    }
+
+    Ok(PathBuf::from(path))
+}
+
+fn home_dir() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or_else(|| "HOME is not set; pass --config and --services explicitly".into())
+}
+
+fn version_is_newer(candidate: &str, current: &str) -> bool {
+    version_parts(candidate) > version_parts(current)
+}
+
+fn version_parts(version: &str) -> [u32; 3] {
+    let mut parts = [0; 3];
+
+    for (index, part) in version
+        .split(['.', '-'])
+        .take(3)
+        .filter_map(|part| part.parse::<u32>().ok())
+        .enumerate()
+    {
+        parts[index] = part;
+    }
+
+    parts
+}
+
+fn print_header() {
+    println!("{}", paint("Avel Pilot", Color::Cyan));
+    println!(
+        "{}",
+        paint("Cloudflare DNS + NPM control plane", Color::Dim)
+    );
+    println!();
+}
+
+fn section(title: &str) {
+    println!("{}", paint(title, Color::Cyan));
+}
+
+fn sub_section(title: &str) {
+    println!("{}", paint(title, Color::Bold));
+}
+
+fn row(label: &str, value: usize) {
+    println!("  {:<28} {}", label, paint(value, Color::Bold));
+}
+
+fn ok(message: &str) {
+    println!("{} {message}", paint("OK", Color::Green));
+}
+
+fn warn(message: &str) {
+    println!("{} {message}", paint("WARN", Color::Yellow));
+}
+
+fn print_error(message: &str) {
+    eprintln!("{} {message}", paint("ERROR", Color::Red));
+}
+
+enum Color {
+    Bold,
+    Cyan,
+    Dim,
+    Green,
+    Red,
+    Yellow,
+}
+
+fn paint(value: impl std::fmt::Display, color: Color) -> String {
+    let code = match color {
+        Color::Bold => "1",
+        Color::Cyan => "36;1",
+        Color::Dim => "2",
+        Color::Green => "32;1",
+        Color::Red => "31;1",
+        Color::Yellow => "33;1",
+    };
+
+    format!("\x1b[{code}m{value}\x1b[0m")
 }

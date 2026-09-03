@@ -55,6 +55,7 @@ pub enum UpstreamScheme {
     Https,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProxyChange {
     Create(ProxyHost),
     Update { id: ProxyHostId, host: ProxyHost },
