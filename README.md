@@ -18,7 +18,7 @@ avel-pilot <command> --help
 
 Available commands:
 
-- `status`: show a summary of managed and unmanaged Cloudflare DNS records, NPM proxy hosts, and NPM SSL certificates
+- `status`: show a table of managed and unmanaged Cloudflare DNS records, NPM proxy hosts, and NPM SSL certificates
 - `diff`: show the DNS, proxy, and certificate changes Avel Pilot would apply
 - `validate`: validate `config.yml` and `services.yml` without contacting providers
 - `apply`: apply the desired state once and exit
@@ -143,8 +143,10 @@ NPM SSL certificates:
 
 - Avel Pilot prefers one wildcard certificate per zone, for example `*.avel.space`
 - it creates the certificate through DNS-01 when at least one service has `tls: true`
+- new certificates include an `avel_pilot` metadata marker
+- existing Let's Encrypt wildcard certificates for the configured zone are also recognized as managed
 - extra certificates are not deleted automatically
-- `status` reports Let's Encrypt certificates with and without the Avel Pilot marker
+- `status` reports managed and unmanaged NPM certificates
 
 ## Install From GitHub Release
 

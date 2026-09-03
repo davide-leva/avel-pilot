@@ -97,6 +97,8 @@ struct NpmCertificateRequest<'a> {
 
 #[derive(Debug, Serialize)]
 struct NpmCertificateRequestMeta<'a> {
+    #[serde(rename = "avel_pilot")]
+    managed_by_avel_pilot: bool,
     dns_challenge: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     dns_provider: Option<&'a str>,
@@ -167,9 +169,7 @@ impl From<NpmCertificate> for Certificate {
         Self {
             id: Some(CertificateId(certificate.id.to_string())),
             meta: CertificateMeta {
-                managed: certificate
-                    .nice_name
-                    .contains(MANAGED_CERTIFICATE_NAME_MARKER),
+                managed: certificate.is_managed_for_zone(None),
             },
             name: Some(certificate.nice_name),
             domains: certificate.domain_names,
@@ -185,12 +185,14 @@ impl<'a> TryFrom<&'a Certificate> for NpmCertificateRequest<'a> {
     fn try_from(certificate: &'a Certificate) -> Result<Self, Self::Error> {
         let meta = match &certificate.challenge {
             CertificateChallenge::Http01 => NpmCertificateRequestMeta {
+                managed_by_avel_pilot: true,
                 dns_challenge: false,
                 dns_provider: None,
                 dns_provider_credentials: None,
                 propagation_seconds: None,
             },
             CertificateChallenge::Dns01(challenge) => NpmCertificateRequestMeta {
+                managed_by_avel_pilot: true,
                 dns_challenge: true,
                 dns_provider: Some(&challenge.provider),
                 dns_provider_credentials: Some(&challenge.credentials),
@@ -246,6 +248,24 @@ impl NpmProxyHost {
             .get(MANAGED_META_KEY)
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false)
+    }
+}
+
+impl NpmCertificate {
+    fn is_managed_for_zone(&self, zone: Option<&str>) -> bool {
+        self.nice_name.contains(MANAGED_CERTIFICATE_NAME_MARKER)
+            || self
+                .meta
+                .get(MANAGED_META_KEY)
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            || zone
+                .map(|zone| {
+                    self.provider == "letsencrypt"
+                        && self.domain_names.len() == 1
+                        && self.domain_names[0].eq_ignore_ascii_case(&format!("*.{zone}"))
+                })
+                .unwrap_or(false)
     }
 }
 
@@ -475,7 +495,7 @@ impl NPMProxyProvider {
         Ok(())
     }
 
-    pub async fn summary(&self) -> ProxyResult<NpmSummary> {
+    pub async fn summary(&self, zone: &str) -> ProxyResult<NpmSummary> {
         let hosts = self
             .request::<Vec<NpmProxyHost>>(Method::GET, "/api/nginx/proxy-hosts")
             .await?;
@@ -485,12 +505,7 @@ impl NPMProxyProvider {
         let proxy_managed = hosts.iter().filter(|host| host.is_managed()).count();
         let ssl_managed = certificates
             .iter()
-            .filter(|certificate| {
-                certificate.provider == "letsencrypt"
-                    && certificate
-                        .nice_name
-                        .contains(MANAGED_CERTIFICATE_NAME_MARKER)
-            })
+            .filter(|certificate| certificate.is_managed_for_zone(Some(zone)))
             .count();
         Ok(NpmSummary {
             proxy_managed,
@@ -546,5 +561,38 @@ impl CertProvider for NPMProxyProvider {
             CertificateChange::Renew { id } => self.renew_certificate(&id).await,
             CertificateChange::Delete { id } => self.delete_certificate(&id).await,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wildcard_letsencrypt_certificate_for_zone_is_managed() {
+        let certificate = NpmCertificate {
+            id: 7,
+            provider: "letsencrypt".to_owned(),
+            nice_name: "npm-7".to_owned(),
+            domain_names: vec!["*.avel.space".to_owned()],
+            _expires_on: None,
+            meta: serde_json::Value::Null,
+        };
+
+        assert!(certificate.is_managed_for_zone(Some("avel.space")));
+    }
+
+    #[test]
+    fn certificate_meta_marker_is_managed() {
+        let certificate = NpmCertificate {
+            id: 7,
+            provider: "other".to_owned(),
+            nice_name: "custom".to_owned(),
+            domain_names: vec!["example.com".to_owned()],
+            _expires_on: None,
+            meta: serde_json::json!({ MANAGED_META_KEY: true }),
+        };
+
+        assert!(certificate.is_managed_for_zone(Some("avel.space")));
     }
 }

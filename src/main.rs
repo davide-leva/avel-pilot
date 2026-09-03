@@ -63,7 +63,7 @@ enum Commands {
     #[command(about = "Create config and services files interactively.")]
     Init,
 
-    #[command(about = "Show managed and unmanaged Cloudflare/NPM resource counts.")]
+    #[command(about = "Show a managed and unmanaged Cloudflare/NPM resource table.")]
     Status,
 
     #[command(about = "Show the changes Avel Pilot would apply.")]
@@ -156,15 +156,32 @@ async fn status(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let files = load_required_files(cli)?;
     let (dns_provider, proxy_provider) = providers(&files.config);
     let dns = dns_provider.summary(zone(&files.config)).await?;
-    let npm = proxy_provider.summary().await?;
+    let npm = proxy_provider.summary(zone(&files.config)).await?;
 
     section("Status");
-    row("Cloudflare DNS managed", dns.managed);
-    row("Cloudflare DNS unmanaged", dns.unmanaged);
-    row("NPM proxy managed", npm.proxy_managed);
-    row("NPM proxy unmanaged", npm.proxy_unmanaged);
-    row("NPM SSL managed", npm.ssl_managed);
-    row("NPM SSL unmanaged", npm.ssl_unmanaged);
+    print_table(
+        &["Provider", "Resource", "Managed", "Unmanaged"],
+        &[
+            vec![
+                "Cloudflare".to_owned(),
+                "DNS records".to_owned(),
+                dns.managed.to_string(),
+                dns.unmanaged.to_string(),
+            ],
+            vec![
+                "NPM".to_owned(),
+                "Proxy hosts".to_owned(),
+                npm.proxy_managed.to_string(),
+                npm.proxy_unmanaged.to_string(),
+            ],
+            vec![
+                "NPM".to_owned(),
+                "SSL certificates".to_owned(),
+                npm.ssl_managed.to_string(),
+                npm.ssl_unmanaged.to_string(),
+            ],
+        ],
+    );
     ok("Status loaded successfully.");
 
     Ok(())
@@ -225,25 +242,26 @@ fn service_list(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    println!(
-        "  {:<18} {:<30} {:<24} {:<5} {:<9}",
-        "Name", "Domain", "Upstream", "TLS", "Websocket"
-    );
-    for (name, service) in &files.services.services {
-        println!(
-            "  {:<18} {:<30} {:<24} {:<5} {:<9}",
-            name,
-            service.domain,
-            format!(
-                "{}://{}:{}",
-                upstream_scheme_name(&service.upstream.scheme),
-                service.upstream.host,
-                service.upstream.port
-            ),
-            yes_no(service.tls),
-            yes_no(service.websocket)
-        );
-    }
+    let rows = files
+        .services
+        .services
+        .iter()
+        .map(|(name, service)| {
+            vec![
+                name.clone(),
+                service.domain.clone(),
+                format!(
+                    "{}://{}:{}",
+                    upstream_scheme_name(&service.upstream.scheme),
+                    service.upstream.host,
+                    service.upstream.port
+                ),
+                yes_no(service.tls).to_owned(),
+                yes_no(service.websocket).to_owned(),
+            ]
+        })
+        .collect::<Vec<_>>();
+    print_table(&["Name", "Domain", "Upstream", "TLS", "Websocket"], &rows);
 
     Ok(())
 }
@@ -909,6 +927,60 @@ fn sub_section(title: &str) {
 
 fn row(label: &str, value: usize) {
     println!("  {:<28} {}", label, paint(value, Color::Bold));
+}
+
+fn print_table(headers: &[&str], rows: &[Vec<String>]) {
+    let widths = table_widths(headers, rows);
+    let border = table_border(&widths);
+
+    println!("  {border}");
+    println!("  {}", table_row(headers, &widths));
+    println!("  {border}");
+    for row in rows {
+        println!("  {}", table_row(row, &widths));
+    }
+    println!("  {border}");
+}
+
+fn table_widths(headers: &[&str], rows: &[Vec<String>]) -> Vec<usize> {
+    headers
+        .iter()
+        .enumerate()
+        .map(|(index, header)| {
+            rows.iter()
+                .filter_map(|row| row.get(index))
+                .map(|value| value.len())
+                .chain(std::iter::once(header.len()))
+                .max()
+                .unwrap_or(0)
+        })
+        .collect()
+}
+
+fn table_border(widths: &[usize]) -> String {
+    let parts = widths
+        .iter()
+        .map(|width| "-".repeat(width + 2))
+        .collect::<Vec<_>>();
+
+    format!("+{}+", parts.join("+"))
+}
+
+fn table_row<T>(values: &[T], widths: &[usize]) -> String
+where
+    T: AsRef<str>,
+{
+    let cells = widths
+        .iter()
+        .enumerate()
+        .map(|(index, width)| {
+            let value = values.get(index).map(AsRef::as_ref).unwrap_or("");
+
+            format!(" {value:<width$} ")
+        })
+        .collect::<Vec<_>>();
+
+    format!("|{}|", cells.join("|"))
 }
 
 fn ok(message: &str) {
